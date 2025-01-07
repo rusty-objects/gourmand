@@ -34,7 +34,7 @@
 * [Kendra](https://aws.amazon.com/kendra/): Optimized for semantic search across unstructured data
 * [OpenSearch](https://aws.amazon.com/opensearch-service/): Fast search of structured data
 
-## Bedrock Featured Model Vendors (2024)
+## Bedrock featured Model Vendors (2024)
 
 * AI21 ([website](https://www.ai21.com/) | [Bedrock](https://aws.amazon.com/bedrock/ai21/)) 
     * Jamba 1.5 Mini
@@ -47,11 +47,11 @@
     * Nova Premier: soon
     * Nova Canvas: text/image to image
     * Nova Reel: text/image to video
-* Anthropic ([[website](https://www.anthropic.com/) | [Bedrock](https://aws.amazon.com/bedrock/claude/))
+* Anthropic ([website](https://www.anthropic.com/) | [Bedrock](https://aws.amazon.com/bedrock/claude/))
     * text only
     * Claude 3.5 Sonnet: advanced, can code and interact with screens
-    * Claude 3.5 Haiku: lighter weight
-    * Claude 3 Opus: previous generation, slower than haiku
+    * Claude 3.5 Haiku: lighter weight than Sonnet, faster than Opus
+    * Claude 3 Opus
 * Cohere ([website](https://cohere.com/) | [Bedrock](https://aws.amazon.com/bedrock/cohere/))
     * Rerank 3.5: reranks vector search results
     * Command R+: bigger than R 
