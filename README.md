@@ -1,9 +1,5 @@
 # Gourmand recipe recommender
 
-## Bedrock References
-* [Bedrock API Reference](https://docs.aws.amazon.com/bedrock/latest/APIReference/welcome.html)
-* [Bedrock Rust SDK](https://github.com/awslabs/aws-sdk-rust) ([crate](https://github.com/awslabs/aws-sdk-rust))
-
 ## Github setup
 
 ### author identity
