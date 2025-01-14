@@ -4,3 +4,30 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
+aws-smithy-types = "1.2.11"
+aws-sdk-bedrockruntime = "1.67.0"
+rusty_bedrock_lib = { git = "https://github.com/rusty-objects/bedrock-lib.git" }
+# rusty_bedrock_lib = { path = "../bedrock-lib" }
+
+base64 = "0.22.1"
+
+# clap 4.x won't work with shellfish.  shellfish uses a deprecated 3.x API
+# clap = { version = "4.5.26", features = ["derive", "cargo"] }
+clap = { version = "3.2.16", features = ["derive", "cargo"] }
+rustyline = "15.0.0"
+shellfish = { version = "0.10.1", features = ["app", "async", "clap"] }
+
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+tokio = { version = "1", features = ["full"] }
+stderrlog = "0.6.0"
+log = "0.4.25"
+
+[lib]
+name = "recipes"
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "recipes"
+path = "src/cli/recipes_main.rs"
