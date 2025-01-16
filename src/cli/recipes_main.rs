@@ -1,5 +1,4 @@
 //! Recipe recommender
-use std::error::Error;
 use std::fs;
 use std::path::Path;
 
@@ -12,6 +11,7 @@ use clap::Parser;
 use log::{debug, warn};
 use recipes::system_prompts::SYS_PROMPT2 as SYS_PROMPT;
 use rusty_bedrock_lib::converse::tool_use::{self, ToolArgType};
+use rusty_bedrock_lib::file;
 use rusty_bedrock_lib::nova::canvas;
 use shellfish::rustyline::DefaultEditor as DefaultEditorRusty;
 use shellfish::{clap_command, handler::DefaultAsyncHandler, Shell};
@@ -22,6 +22,7 @@ use shellfish::{clap_command, handler::DefaultAsyncHandler, Shell};
 ///
 /// Example:
 ///     converse -p bedrock -o ~/Desktop -m us.amazon.nova-lite-v1:0
+// these are the args for launching the shell
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, verbatim_doc_comment)]
 struct CliArgs {
@@ -87,6 +88,15 @@ struct CliArgs {
     list: bool,
 }
 
+/// Send a message to the model
+// sub command within the shell once it's launched
+#[derive(Parser, Debug)]
+#[clap(author, version, about)]
+struct SayArgs {
+    /// The prompt for your next turn in the conversation
+    prompt: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli: CliArgs = CliArgs::parse();
@@ -102,12 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // https://docs.rs/aws-sdk-bedrockruntime/latest/aws_sdk_bedrockruntime/
     let client = rusty_bedrock_lib::new_runtime_client(cli.aws_profile).await;
 
-    // -------------
-    // Use a system prompt to set the tone for the conversation
-    // -------------
+    // System prompt sets the tone for the conversation
     let system_prompt = Some(vec![SystemContentBlock::Text(SYS_PROMPT.to_string())]);
 
-    let tools = mk_tool();
+    let tools = mk_recipe_tramission_tool();
     debug!("tools:\n{:?}", tools);
 
     let mut state = ConversationState {
@@ -120,10 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages: vec![],
     };
 
-    // -------------
     // start with the model introducing itself
-    // -------------
-    say_with_prompt(&mut state, "
+    handle_prompt(&mut state, "
     To begin, please introduce yourself and ask the user some basic questions about their preferences
     ".to_string()).await.unwrap();
 
@@ -136,13 +142,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DefaultAsyncHandler::default(),
         DefaultEditorRusty::new()?,
     );
-    shell
-        .commands
-        .insert("say", clap_command!(ConversationState, SayArgs, async say));
+    shell.commands.insert(
+        "say",
+        clap_command!(ConversationState, SayArgs, async |state, args: SayArgs| {
+            handle_prompt(state, args.prompt)
+        }),
+    );
     shell.run_async().await?;
 
     Ok(())
 }
+
+// ==========================================
+// Conversation Event Loop
+// ==========================================
 
 #[derive(Debug)]
 pub struct ConversationState {
@@ -155,85 +168,7 @@ pub struct ConversationState {
     pub tools: Option<ToolConfiguration>,
 }
 
-/// Send a message to the model
-#[derive(Parser, Debug)]
-#[clap(author, version, about)]
-struct SayArgs {
-    /// The prompt for your next turn in the conversation
-    prompt: String,
-}
-
-async fn say(
-    state: &mut ConversationState,
-    args: SayArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    say_with_prompt(state, args.prompt).await
-}
-
-#[derive(Debug)]
-pub enum ConversationTurnInput {
-    Prompt(String),
-    ToolResponse(ToolResultBlock),
-}
-impl ConversationTurnInput {
-    pub fn to_content(&self) -> ContentBlock {
-        match self {
-            ConversationTurnInput::Prompt(txt) => ContentBlock::Text(txt.to_string()),
-            ConversationTurnInput::ToolResponse(tool) => ContentBlock::ToolResult(tool.clone()),
-        }
-    }
-}
-
-/// Adds the message (and the response message) to the conversation state
-pub async fn conversation_turn(
-    state: &mut ConversationState,
-    turn: ConversationTurnInput,
-) -> (StopReason, Message) {
-    debug!("model: {}", state.model);
-    debug!("{:?}", turn);
-
-    // ===========================
-    // Create a new message from the ConversationTurnInput
-    // ===========================
-    let msg = Message::builder()
-        .role(ConversationRole::User)
-        .content(turn.to_content())
-        .build()
-        .unwrap();
-
-    state.messages.push(msg);
-
-    // ===========================
-    // Send request to bedrock with entire conversation history
-    // ===========================
-    let conversation = state
-        .client
-        .converse()
-        .model_id(state.model.clone())
-        .set_system(state.system_prompt.clone())
-        .set_messages(Some(state.messages.clone()))
-        .set_tool_config(state.tools.clone())
-        .send()
-        .await
-        .unwrap();
-
-    debug!("{:?}", conversation);
-
-    // ===========================
-    // Extract assistant's response onto the message history state, return it
-    // ===========================
-    let stop_reason = conversation.stop_reason().clone();
-    if let Some(ConverseOutput::Message(msg)) = conversation.output() {
-        assert_eq!(&ConversationRole::Assistant, msg.role());
-        state.messages.push(msg.clone());
-        debug!("{:?}", msg);
-        return (stop_reason, msg.clone());
-    } else {
-        panic!("No output??");
-    };
-}
-
-async fn say_with_prompt(
+async fn handle_prompt(
     state: &mut ConversationState,
     prompt: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -287,7 +222,7 @@ async fn say_with_prompt(
                 }
                 ContentBlock::ToolUse(tool_use_block) => {
                     // println!("PROCESSING TOOL USE");
-                    let tool_use_response = process_tool_use(state, tool_use_block).await;
+                    let tool_use_response = handle_tool_use(state, tool_use_block).await;
                     (stop_reason, msg) = conversation_turn(
                         state,
                         ConversationTurnInput::ToolResponse(tool_use_response),
@@ -305,7 +240,89 @@ async fn say_with_prompt(
     }
 }
 
-pub fn mk_tool() -> ToolConfiguration {
+#[derive(Debug)]
+pub enum ConversationTurnInput {
+    Prompt(String),
+    ToolResponse(ToolResultBlock),
+}
+impl ConversationTurnInput {
+    pub fn to_content(&self) -> ContentBlock {
+        match self {
+            ConversationTurnInput::Prompt(txt) => ContentBlock::Text(txt.to_string()),
+            ConversationTurnInput::ToolResponse(tool) => ContentBlock::ToolResult(tool.clone()),
+        }
+    }
+}
+
+/// Adds the message (and the response message) to the conversation state
+pub async fn conversation_turn(
+    state: &mut ConversationState,
+    turn: ConversationTurnInput,
+) -> (StopReason, Message) {
+    debug!("model: {}", state.model);
+    debug!("{:?}", turn);
+
+    // ===========================
+    // Create a new message from the ConversationTurnInput
+    // ===========================
+    let msg = Message::builder()
+        .role(ConversationRole::User)
+        .content(turn.to_content())
+        .build()
+        .unwrap();
+
+    state.messages.push(msg);
+
+    // ===========================
+    // Send request to bedrock with entire conversation history
+    // ===========================
+    let conversation = state
+        .client
+        .converse()
+        .model_id(state.model.clone())
+        .set_system(state.system_prompt.clone())
+        .set_messages(Some(state.messages.clone()))
+        .set_tool_config(state.tools.clone())
+        .send()
+        .await
+        .unwrap();
+    /*
+    TODO: Don't crash on Throttling Exception
+    thread 'main' panicked at src/cli/recipes_main.rs:227:10:
+    called `Result::unwrap()` on an `Err` value: ServiceError(ServiceError { source: ThrottlingException(ThrottlingException
+    { message: Some("Too many requests, please wait before trying again."), meta: ErrorMetadata { code: Some("ThrottlingException"),
+     message: Some("Too many requests, please wait before trying again."), extras: Some({"aws_request_id":
+     "a08a73eb-05c5-416f-b6f4-51f9cab3f35f"}) } }), raw: Response { status: StatusCode(429), headers: Headers { headers:
+     {"date": HeaderValue { _private: H0("Thu, 16 Jan 2025 05:58:20 GMT") }, "content-type": HeaderValue {
+     _private: H0("application/json") }, "content-length": HeaderValue { _private: H0("65") }, "x-amzn-requestid": HeaderValue
+     { _private: H0("a08a73eb-05c5-416f-b6f4-51f9cab3f35f") }, "x-amzn-errortype": HeaderValue
+      { _private: H0("ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/") }} }, body: SdkBody {
+       inner: Once(Some(b"{\"message\":\"Too many requests, please wait before trying again.\"}")), retryable: true }, extensions:
+       Extensions { extensions_02x: Extensions, extensions_1x: Extensions } } })
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    */
+
+    debug!("{:?}", conversation);
+
+    // ===========================
+    // Extract assistant's response onto the message history state, return it
+    // ===========================
+    let stop_reason = conversation.stop_reason().clone();
+    if let Some(ConverseOutput::Message(msg)) = conversation.output() {
+        assert_eq!(&ConversationRole::Assistant, msg.role());
+        state.messages.push(msg.clone());
+        debug!("{:?}", msg);
+        return (stop_reason, msg.clone());
+    } else {
+        panic!("No output??");
+    };
+}
+
+// ==========================================
+// Tool Use
+// ==========================================
+
+pub fn mk_recipe_tramission_tool() -> ToolConfiguration {
     let name = "transmit_recipe".to_string();
     let description = "
     this tool transmits a recipe (ingredients, instructions, and shopping list), a prompt for an
@@ -340,53 +357,39 @@ pub fn mk_tool() -> ToolConfiguration {
 }
 
 // https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/bedrock-runtime/src/bin/tool-use.rs#L190
-pub async fn process_tool_use(
+pub async fn handle_tool_use(
     state: &mut ConversationState,
     tool_use: &ToolUseBlock,
 ) -> ToolResultBlock {
-    // println!("=-=-=-=\nTOOL USE\n=-=-=-=\n{:#?}", tool_use);
+    debug!("tool use id: {:?}", tool_use.tool_use_id());
+    debug!("tool name: {:?}", tool_use.name());
 
-    // println!("     - tool use id: {:?}", tool_use.tool_use_id());
-    // println!("     - tool name: {:?}", tool_use.name());
+    if tool_use.name() != "transmit_recipe" {
+        panic!("model asked for unexpected tool: {}", tool_use.name());
+    }
+
     let input = tool_use.input();
+    let input_map = input.as_object().unwrap();
 
-    // TODO sanitize!!
-    let file_stem = input
-        .as_object()
-        .unwrap()
+    let file_stem = input_map
         .get("file_stem")
         .map_or("default".to_string(), |doc| {
             doc.as_string().unwrap().to_string()
         });
 
-    let image_prompt = input
-        .as_object()
-        .unwrap()
+    let image_prompt = input_map
         .get("image_prompt")
         .map_or("default".to_string(), |doc| {
             doc.as_string().unwrap().to_string()
         });
 
-    let recipe_details = input
-        .as_object()
-        .unwrap()
+    let recipe_details = input_map
         .get("recipe_details")
         .map_or("default".to_string(), |doc| {
             doc.as_string().unwrap().to_string()
         });
 
-    let outdir = format!("{}/{}", state.output, file_stem).to_string();
-    let mut files = vec![];
-    let (_trace_id, images) = canvas::text_to_image(&state.client, image_prompt, None).await;
-    for (idx, image) in images.into_iter().enumerate() {
-        let path = format!("{}-{}.png", outdir, idx);
-        rusty_bedrock_lib::file::write_base64(path.as_str(), image);
-        files.push(path);
-    }
-    let txt_path = format!("{}.txt", outdir).to_owned();
-    files.push(txt_path.clone());
-    let expanded = rusty_bedrock_lib::file::expand(&txt_path);
-    let _ = fs::write(Path::new(expanded.as_str()), recipe_details);
+    let outdir = transmit_recipe(state, file_stem, image_prompt, recipe_details).await;
 
     ToolResultBlock::builder()
         .tool_use_id(tool_use.tool_use_id())
@@ -397,17 +400,28 @@ pub async fn process_tool_use(
         .unwrap()
 }
 
-#[allow(dead_code)]
-struct RecipeOutputLocation {
-    image: String,
-    recipe: String,
-}
-fn _save_with_image(
-    _filename: String,
-    _image_prompt: String,
-    _recipe: String,
-) -> Result<RecipeOutputLocation, Box<dyn Error>> {
-    // TODO: make sure to sanitize the filename: only a-zA-Z0-9_ in filename.  Replace anything else with _.
-    // TODO: "come up with an a fully lowercase, short unique filename for a recipe, appending an underscore and random 5 digit numeric to the end.  do not use a file extension or any spaces in the name, but you should use underscores to separate words.  only output the filename without formatting or explanation"
-    todo!();
+async fn transmit_recipe(
+    state: &ConversationState,
+    file_stem: String,
+    image_prompt: String,
+    recipe_details: String,
+) -> String {
+    // !!!!!!!!!!!!!!
+    // We must sanitize the path because some of the input came from the model
+    // !!!!!!!!!!!!!!
+    let file_stem = file::sanitize(file_stem);
+    let outdir = format!("{}/{}", state.output, file_stem).to_string();
+    let mut files = vec![];
+
+    let (_trace_id, images) = canvas::text_to_image(&state.client, image_prompt, None).await;
+    for (idx, image) in images.into_iter().enumerate() {
+        let path = format!("{}-{}.png", outdir, idx);
+        rusty_bedrock_lib::file::write_base64(path.as_str(), image);
+        files.push(path);
+    }
+    let txt_path = format!("{}.txt", outdir).to_owned();
+    let expanded = rusty_bedrock_lib::file::expand(&txt_path);
+    let _ = fs::write(Path::new(expanded.as_str()), recipe_details);
+    files.push(txt_path.clone());
+    outdir
 }
