@@ -8,7 +8,7 @@ use aws_sdk_bedrockruntime::types::{
 };
 use aws_sdk_bedrockruntime::Client;
 use clap::Parser;
-use log::{debug, warn};
+use log::{debug, info};
 use recipes::system_prompts::SYS_PROMPT2 as SYS_PROMPT;
 use rusty_bedrock_lib::converse::tool_use::{self, ToolArgType};
 use rusty_bedrock_lib::file;
@@ -172,84 +172,100 @@ async fn handle_prompt(
     state: &mut ConversationState,
     prompt: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut stop_reason, mut msg) =
-        conversation_turn(state, ConversationTurnInput::Prompt(prompt)).await;
+    let mut turn_input = ContentBlock::Text(prompt);
 
     // -------------------
     // Loop for tool output.  When we're done with tool requests we'll return,
     // which will cause the shell to wait for the next prompt from user input.
     // -------------------
     loop {
-        // set content (mut) above
-        // TODO move conversation turn here.  then process response (either
-        // print or fetch a tool and prepare tool response content)
-        // after that, check stop_reason.  if end_turn, return.  If tool_use,
-        // loop again (with the content coming to the top of the loop for
-        // conversation turn).  If it's anything else, then throw an error
-        // or panic.
-        //
-        // TODO if anthropic slows you down, don't panic, just print
+        // let (stop_reason, msg) = conversation_turn(state, turn_input.clone()).await;
 
-        debug!(">>> STOP REASON {} <<<", stop_reason);
+        // =======================
+        // Send the content as a message
+        // =======================
+        debug!("model: {}", state.model);
+        debug!("{:?}", turn_input);
+
+        let msg = Message::builder()
+            .role(ConversationRole::User)
+            .content(turn_input.clone())
+            .build()
+            .unwrap();
+
+        // add our message to the message state history
+        state.messages.push(msg);
+
+        // Send request to bedrock
+        let converse_response = state
+            .client
+            .converse()
+            .model_id(state.model.clone())
+            .set_system(state.system_prompt.clone())
+            .set_messages(Some(state.messages.clone()))
+            .set_tool_config(state.tools.clone())
+            .send()
+            .await
+            .unwrap();
         /*
-        match stop_reason {
-            StopReason::ContentFiltered => todo!(),
-            StopReason::EndTurn => todo!(),
-            StopReason::GuardrailIntervened => todo!(),
-            StopReason::MaxTokens => todo!(),
-            StopReason::StopSequence => todo!(),
-            StopReason::ToolUse => todo!(),
-            StopReason::Unknown(unknown_variant_value) => todo!(),
-            _ => todo!(),
-        }
+        TODO: Don't crash on Throttling Exception
+        thread 'main' panicked at src/cli/recipes_main.rs:227:10:
+        called `Result::unwrap()` on an `Err` value: ServiceError(ServiceError { source: ThrottlingException(ThrottlingException
+        { message: Some("Too many requests, please wait before trying again."), meta: ErrorMetadata { code: Some("ThrottlingException"),
+         message: Some("Too many requests, please wait before trying again."), extras: Some({"aws_request_id":
+         "a08a73eb-05c5-416f-b6f4-51f9cab3f35f"}) } }), raw: Response { status: StatusCode(429), headers: Headers { headers:
+         {"date": HeaderValue { _private: H0("Thu, 16 Jan 2025 05:58:20 GMT") }, "content-type": HeaderValue {
+         _private: H0("application/json") }, "content-length": HeaderValue { _private: H0("65") }, "x-amzn-requestid": HeaderValue
+         { _private: H0("a08a73eb-05c5-416f-b6f4-51f9cab3f35f") }, "x-amzn-errortype": HeaderValue
+          { _private: H0("ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/") }} }, body: SdkBody {
+           inner: Once(Some(b"{\"message\":\"Too many requests, please wait before trying again.\"}")), retryable: true }, extensions:
+           Extensions { extensions_02x: Extensions, extensions_1x: Extensions } } })
+        note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
         */
+
+        debug!("{:?}", converse_response);
+
+        let stop_reason = converse_response.stop_reason().clone();
+        let response_contents =
+            if let Some(ConverseOutput::Message(msg)) = converse_response.output() {
+                assert_eq!(&ConversationRole::Assistant, msg.role());
+
+                // save assistant's response onto the message state history
+                state.messages.push(msg.clone());
+                debug!("{:?}", msg);
+                msg.content()
+                    .into_iter()
+                    .map(Clone::clone)
+                    .collect::<Vec<_>>()
+            } else {
+                panic!("No output??");
+            };
+
+        // ^^^^^^^
+
+        debug!(">>> Stop Reason {} <<<", stop_reason);
+
+        // --------------------
+        // Handle all the content in the block.  Even if it's tool_use, there
+        // may be text.  Sometimes models like to say they're using a tool.
+        // --------------------
         let mut found_tool = false;
-        let cloned = msg.clone();
-
-        // TODO you forgot to look at stop reason
-        // TODO also this looping construct is ugly as hell
-
-        for content in cloned.content() {
+        for content in response_contents {
             match content {
-                ContentBlock::Document(_document_block) => todo!(),
-                ContentBlock::GuardContent(_guardrail_converse_content_block) => {
-                    warn!("unexpected guardrail")
-                }
-                ContentBlock::Image(_image_block) => warn!("<<<< unexpected image "),
                 ContentBlock::Text(s) => println!("{}", s),
-                ContentBlock::ToolResult(_tool_result_block) => {
-                    warn!("unexpected tool result")
-                }
-                ContentBlock::ToolUse(tool_use_block) => {
-                    // println!("PROCESSING TOOL USE");
-                    let tool_use_response = handle_tool_use(state, tool_use_block).await;
-                    (stop_reason, msg) = conversation_turn(
-                        state,
-                        ConversationTurnInput::ToolResponse(tool_use_response),
-                    )
-                    .await;
+                ContentBlock::ToolUse(tool_use) => {
+                    info!("tool: {:?}", tool_use);
+                    assert!(!found_tool, "multiple tool use calls in one msg?");
+                    turn_input = ContentBlock::ToolResult(handle_tool_use(state, &tool_use).await);
                     found_tool = true;
                 }
-                ContentBlock::Video(_video_block) => warn!("unexpected video"),
-                _ => panic!("Unknown response ContentBlock: {:?}", content),
+                _ => panic!("Unknown Response ContentBlock: {:?}", content),
             }
         }
-        if !found_tool {
-            return Ok(());
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ConversationTurnInput {
-    Prompt(String),
-    ToolResponse(ToolResultBlock),
-}
-impl ConversationTurnInput {
-    pub fn to_content(&self) -> ContentBlock {
-        match self {
-            ConversationTurnInput::Prompt(txt) => ContentBlock::Text(txt.to_string()),
-            ConversationTurnInput::ToolResponse(tool) => ContentBlock::ToolResult(tool.clone()),
+        match stop_reason {
+            StopReason::EndTurn => return Ok(()),
+            StopReason::ToolUse => (), // loop again
+            _ => panic!("Unexpected Stop Reason {:?}", stop_reason),
         }
     }
 }
@@ -257,17 +273,17 @@ impl ConversationTurnInput {
 /// Adds the message (and the response message) to the conversation state
 pub async fn conversation_turn(
     state: &mut ConversationState,
-    turn: ConversationTurnInput,
+    input_content: ContentBlock,
 ) -> (StopReason, Message) {
     debug!("model: {}", state.model);
-    debug!("{:?}", turn);
+    debug!("{:?}", input_content);
 
     // ===========================
     // Create a new message from the ConversationTurnInput
     // ===========================
     let msg = Message::builder()
         .role(ConversationRole::User)
-        .content(turn.to_content())
+        .content(input_content)
         .build()
         .unwrap();
 
@@ -406,9 +422,7 @@ async fn transmit_recipe(
     image_prompt: String,
     recipe_details: String,
 ) -> String {
-    // !!!!!!!!!!!!!!
-    // We must sanitize the path because some of the input came from the model
-    // !!!!!!!!!!!!!!
+    // !!!!! sanitize the path because some of the input came from the model !!!!!
     let file_stem = file::sanitize(file_stem);
     let outdir = format!("{}/{}", state.output, file_stem).to_string();
     let mut files = vec![];
