@@ -8,7 +8,7 @@ use aws_sdk_bedrockruntime::types::{
 };
 use aws_sdk_bedrockruntime::Client;
 use clap::Parser;
-use log::{debug, info};
+use log::{debug, error, info};
 use recipes::system_prompts::SYS_PROMPT2 as SYS_PROMPT;
 use rusty_bedrock_lib::converse::tool_use::{self, ToolArgType};
 use rusty_bedrock_lib::file;
@@ -197,7 +197,7 @@ async fn handle_prompt(
         state.messages.push(msg);
 
         // Send request to bedrock
-        let converse_response = state
+        let converse_result = state
             .client
             .converse()
             .model_id(state.model.clone())
@@ -205,8 +205,12 @@ async fn handle_prompt(
             .set_messages(Some(state.messages.clone()))
             .set_tool_config(state.tools.clone())
             .send()
-            .await
-            .unwrap();
+            .await;
+        match converse_result {
+            Ok(happy) => debug!("{:?}", happy),
+            Err(sad) => error!("{:?}", sad),
+        }
+        let converse_response = converse_result.unwrap();
         /*
         TODO: Don't crash on Throttling Exception
         thread 'main' panicked at src/cli/recipes_main.rs:227:10:
